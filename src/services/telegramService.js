@@ -3,6 +3,12 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import { User } from '../models/User.js';
 import { Room } from '../models/Room.js';
+import CyrillicToTranslit from 'cyrillic-to-translit-js';
+
+const translit = new CyrillicToTranslit({ preset: 'uk' })
+
+// Латиница → кириллица (обратное)
+const fromLatin = (text) => translit.reverse(text);
 
 dotenv.config();
 
@@ -219,7 +225,7 @@ setInterval(async () => {
       message += '<b>Средние доли по капиталам</b>\n';
       for (const m of marked.members) {
         const c = capitals[m];
-        message += `• <b>${m}</b>\n`;
+        message += `• <b>${m.startsWith('us') ? fromLatin(m.slice(2)) : m}</b>\n`;
         message += `<code>Экон ${pad(c.econ.toFixed(1))}%  ${bar(c.econ)}</code>\n`;
         message += `<code>Чел  ${pad(c.human.toFixed(1))}%  ${bar(c.human)}</code>\n`;
         message += `<code>Соц  ${pad(c.social.toFixed(1))}%  ${bar(c.social)}</code>\n\n`;
@@ -227,7 +233,7 @@ setInterval(async () => {
 
       message += '<b>Итоговые доли</b>\n';
       for (const s of sortedShares) {
-        message += `• <b>${s.name}</b>: <b>${s.share}%</b>\n`;
+        message += `• <b>${s.name.startsWith('us') ? fromLatin(s.name.slice(2)) : s.name}</b>: <b>${s.share}%</b>\n`;
       }
 
       // Рассылка участникам (HTML)
