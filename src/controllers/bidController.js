@@ -32,16 +32,22 @@ export const sendBidMessage = async (req, res) => {
 
     // 3) Готовим имя и кликабельную ссылку
     const participantFromArchive = archivedRoom?.answers?.find(a => String(a.id) === String(id));
-    const rawName = ([user.firstName, user.lastName].filter(Boolean).join(' ') || user.name || 'Без имени');
+
+    // helper: validate real public Telegram username (5-32 chars, letters/digits/underscore)
+    const isValidUsername = (u) => typeof u === 'string' && /^[a-zA-Z0-9_]{5,32}$/.test(u);
+    const hasUsername = isValidUsername(user.username);
+
+    // Prefer only first/last name; do not fall back to user.name to avoid "User" suffixes
+    const rawName = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'Без имени';
     const safeName = String(rawName).trim().replace(/\s+/g, ' ');
-    const userLink = user.username
+
+    const userLink = hasUsername
       ? `<a href="https://t.me/${user.username}">${safeName}</a>`
       : `<a href="tg://user?id=${id}">${safeName}</a>`;
 
     // 4) Шапка заявки (единый стиль, как у итогов)
     let message = `<b>📊 Заявка на разбор партнёрства</b>\n\n`;
-    const nickLabel = user.username ? `@${user.username}` : '(без никнейма)';
-    message += `👤 <b>Участник:</b> ${nickLabel} — <b>${safeName}</b>\n`;
+    message += `👤 <b>Участник:</b> ${userLink}\n`;
     const roomId = archivedRoom?.roomId ?? '—';
     const membersCount = Array.isArray(archivedRoom?.members) ? archivedRoom.members.length : '—';
     message += `<b>Комната:</b> ${roomId}\n`;
@@ -87,9 +93,12 @@ export const sendBidMessage = async (req, res) => {
     }
 
     const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
-    const profileUrl = user.username ? `https://t.me/${user.username}` : `tg://user?id=${id}`;
-    const replyMarkup = { inline_keyboard: [[{ text: '👤 Открыть профиль', url: profileUrl }]] };
-    await bot.sendMessage(GROUP_CHAT_ID, message, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: replyMarkup });
+    const options = { parse_mode: 'HTML', disable_web_page_preview: true };
+    if (hasUsername) {
+      options.reply_markup = { inline_keyboard: [[{ text: '👤 Открыть профиль', url: `https://t.me/${user.username}` }]] };
+    }
+    // Note: если никнейма нет, кнопку не добавляем — `tg://` в URL-кнопках Telegram не работает.
+    await bot.sendMessage(GROUP_CHAT_ID, message, options);
 
     return res.json({ success: true });
   } catch (error) {
