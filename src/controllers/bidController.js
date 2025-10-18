@@ -32,73 +32,126 @@ export const sendBidMessage = async (req, res) => {
 
     // 3) Готовим имя и кликабельную ссылку
     const participantFromArchive = archivedRoom?.answers?.find(a => String(a.id) === String(id));
-
-    // helper: validate real public Telegram username (5-32 chars, letters/digits/underscore)
-    const isValidUsername = (u) => typeof u === 'string' && /^[a-zA-Z0-9_]{5,32}$/.test(u);
-    const hasUsername = isValidUsername(user.username);
-
-    // Prefer only first/last name; do not fall back to user.name to avoid "User" suffixes
-    const rawName = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'Без имени';
+    const rawName = ([user.firstName, user.lastName].filter(Boolean).join(' ') || user.name || 'Без имени');
     const safeName = String(rawName).trim().replace(/\s+/g, ' ');
-
-    const userLink = hasUsername
+    const userLink = user.username
       ? `<a href="https://t.me/${user.username}">${safeName}</a>`
       : `<a href="tg://user?id=${id}">${safeName}</a>`;
 
-    // 4) Шапка заявки (единый стиль, как у итогов)
-    let message = `<b>📊 Заявка на разбор партнёрства</b>\n\n`;
-    message += `👤 <b>Участник:</b> ${userLink}\n`;
-    const roomId = archivedRoom?.roomId ?? '—';
-    const membersCount = Array.isArray(archivedRoom?.members) ? archivedRoom.members.length : '—';
-    message += `<b>Комната:</b> ${roomId}\n`;
-    message += `<b>Участников:</b> ${membersCount}\n\n`;
+    // 4) Шапка заявки (plain text + entities) — без parse_mode
+    // Требуемый вид:
+    //  👤 Участник: @xvnex - Xvnex
+    //  если нет никнейма → @ - Xvnex
+    //  если ошибка в имени → @xvnex - User
+
+    // username label strictly as requested
+    const hasUsername = Boolean(user.username);
+    const shownUsername = hasUsername ? `@${user.username}` : '@';
+
+    // build display name with validation; fallback to 'User' on suspicious/empty
+    const buildDisplayName = () => {
+      let nm = [user.firstName, user.lastName].filter(Boolean).join(' ').trim().replace(/\s+/g, ' ');
+      if (!nm || nm.length < 2 || /undefined|null/i.test(nm) || /[<>]/.test(nm)) return 'User';
+      return nm;
+    };
+    const displayName = buildDisplayName();
+
+    // We'll collect text and entities
+    let text = '';
+    const entities = [];
+
+    // Title (bold)
+    {
+      const title = '📊 Заявка на разбор партнёрства';
+      const start = text.length; text += title + '\n\n';
+      entities.push({ type: 'bold', offset: start, length: title.length });
+    }
+
+    // Header line (participant): "👤 Участник: <username> -  <displayName>"
+    // Note: there are two spaces after the dash to match the example
+    {
+      const prefix = '👤 Участник: ';
+      const header = `${prefix}${shownUsername} -  ${displayName}`;
+      const headerStart = text.length;
+      text += header + '\n';
+
+      // Make only the displayName clickable
+      const nameOffsetInHeader = header.length - displayName.length; // end-based calc
+      const globalNameOffset = headerStart + nameOffsetInHeader;
+
+      if (hasUsername) {
+        entities.push({ type: 'text_link', offset: globalNameOffset, length: displayName.length, url: `https://t.me/${user.username}` });
+      } else {
+        // users without usernames → use text_mention entity to open by id
+        entities.push({ type: 'text_mention', offset: globalNameOffset, length: displayName.length, user: { id: Number(id), first_name: displayName } });
+      }
+    }
+
+    // Room / members (bold labels)
+    {
+      const label1 = 'Комната:'; const val1 = archivedRoom?.roomId ?? '—';
+      const start = text.length; const line = `${label1} ${val1}`; text += line + '\n';
+      entities.push({ type: 'bold', offset: start, length: label1.length });
+    }
+    {
+      const label2 = 'Участников:'; const val2 = Array.isArray(archivedRoom?.members) ? archivedRoom.members.length : '—';
+      const start = text.length; const line = `${label2} ${val2}`; text += line + '\n\n';
+      entities.push({ type: 'bold', offset: start, length: label2.length });
+    }
 
     // 5) Если пользователь найден в архиве — выводим ответы/оценки
     if (archivedRoom && participantFromArchive) {
-      // 🧠 Ответы на вопросы (массив строк)
+      // 🧠 Ответы на вопросы
       if (Array.isArray(participantFromArchive.questions_answers) && participantFromArchive.questions_answers.length) {
-        message += `<b>🧠 Ответы на вопросы:</b>\n`;
+        const label = '🧠 Ответы на вопросы:';
+        const start = text.length; text += label + '\n';
+        entities.push({ type: 'bold', offset: start, length: label.length });
         participantFromArchive.questions_answers.forEach((ans, i) => {
           const t = String(ans ?? '').trim().replace(/\s+/g, ' ');
-          message += `${i + 1}. ${t}\n`;
+          text += `${i + 1}. ${t}\n`;
         });
-        message += `\n`;
+        text += '\n';
       }
 
-      // 📈 Итоговые доли (если сохранены в архиве)
+      // 📈 Средние доли по капиталам
       if (archivedRoom?.result?.capitals && archivedRoom?.members?.length) {
-        message += `<b>Средние доли по капиталам</b>\n`;
+        const label = 'Средние доли по капиталам';
+        const start = text.length; text += label + '\n';
+        entities.push({ type: 'bold', offset: start, length: label.length });
+
         for (const m of archivedRoom.members) {
           const caps = archivedRoom.result.capitals[m] || { econ: 0, human: 0, social: 0 };
-          message += `• ${m}\n`;
-          message += `<code>Экон ${pad((caps.econ ?? 0).toFixed(1))} %  ${bar(caps.econ)}</code>\n`;
-          message += `<code>Чел  ${pad((caps.human ?? 0).toFixed(1))} %  ${bar(caps.human)}</code>\n`;
-          message += `<code>Соц  ${pad((caps.social ?? 0).toFixed(1))} %  ${bar(caps.social)}</code>\n\n`;
+          text += `• ${m}\n`;
+          const line1 = `Экон ${pad((caps.econ ?? 0).toFixed(1))} %  ${bar(caps.econ)}`;
+          const l1s = text.length; text += line1 + '\n'; entities.push({ type: 'code', offset: l1s, length: line1.length });
+          const line2 = `Чел  ${pad((caps.human ?? 0).toFixed(1))} %  ${bar(caps.human)}`;
+          const l2s = text.length; text += line2 + '\n'; entities.push({ type: 'code', offset: l2s, length: line2.length });
+          const line3 = `Соц  ${pad((caps.social ?? 0).toFixed(1))} %  ${bar(caps.social)}`;
+          const l3s = text.length; text += line3 + '\n\n'; entities.push({ type: 'code', offset: l3s, length: line3.length });
         }
       }
 
       if (archivedRoom?.result?.shares?.length) {
-        message += `<b>Итоговые доли</b>\n`;
+        const label = 'Итоговые доли';
+        const start = text.length; text += label + '\n';
+        entities.push({ type: 'bold', offset: start, length: label.length });
         for (const s of archivedRoom.result.shares) {
           const nm = String(s.name ?? '').trim().replace(/\s+/g, ' ');
-          message += `• ${nm}: <b>${s.share}%</b>\n`;
+          text += `• ${nm}: ${s.share}%\n`;
         }
       } else {
-        // Архив есть, но расчёта нет
-        message += `<i>Тест ещё не проходил.</i>\n\n`;
+        text += 'Тест ещё не проходил.\n\n';
       }
     } else {
-      // Нет архива — та же форма, без результатов
-      message += `<i>Тест ещё не проходил.</i>\n\n`;
+      text += 'Тест ещё не проходил.\n\n';
     }
 
     const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
-    const options = { parse_mode: 'HTML', disable_web_page_preview: true };
+    const options = { disable_web_page_preview: true, entities };
     if (hasUsername) {
       options.reply_markup = { inline_keyboard: [[{ text: '👤 Открыть профиль', url: `https://t.me/${user.username}` }]] };
     }
-    // Note: если никнейма нет, кнопку не добавляем — `tg://` в URL-кнопках Telegram не работает.
-    await bot.sendMessage(GROUP_CHAT_ID, message, options);
+    await bot.sendMessage(GROUP_CHAT_ID, text, options);
 
     return res.json({ success: true });
   } catch (error) {
