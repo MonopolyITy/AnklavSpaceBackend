@@ -54,7 +54,7 @@ export const createRoom = async (req, res) => {
 export const addAnswer = async (req, res) => {
   try {
     const { roomId } = req.params;
-    const { id, name, self_input, partners_input } = req.body;
+    const { id, name, questions_answers, self_input, partners_input } = req.body;
 
     const room = await Room.findOne({ roomId });
     if (!room) return res.status(404).json({ error: "Комната не найдена" });
@@ -67,7 +67,6 @@ export const addAnswer = async (req, res) => {
     // Проверка: уникальность id и name
     const duplicateId = room.answers.find((a) => a.id === id);
     const duplicateName = room.answers.find((a) => a.name.toLowerCase() === name.toLowerCase());
-
     if (duplicateId || duplicateName) {
       return res.status(400).json({ error: "Пользователь с таким ID или именем уже добавлен" });
     }
@@ -85,7 +84,15 @@ export const addAnswer = async (req, res) => {
       return res.status(400).json({ error: "Участник не может оценивать сам себя" });
     }
 
-    room.answers.push({ id, name, self_input, partners_input });
+    // Добавляем новый ответ
+    room.answers.push({
+      id,
+      name,
+      questions_answers, 
+      self_input,
+      partners_input,
+    });
+
     await room.save();
 
     res.json({

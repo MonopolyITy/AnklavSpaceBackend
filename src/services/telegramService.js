@@ -3,6 +3,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import { User } from '../models/User.js';
 import { Room } from '../models/Room.js';
+import { ArchivedRoom } from '../models/ArchivedRoom.js';
 import CyrillicToTranslit from 'cyrillic-to-translit-js';
 
 const translit = new CyrillicToTranslit({ preset: 'uk' })
@@ -35,6 +36,228 @@ const replyMarkup = {
   ]
 };
 
+// ─────────────────────────────────────────────
+// Post-test flow helpers
+// ─────────────────────────────────────────────
+const LINKS = {
+  channel: process.env.ARTEM_CHANNEL_URL || 'https://t.me/thekhromykh',
+  site: process.env.SITE_URL || 'https://anklav.legal/space#prev',
+};
+const postTestTimers = new Map(); // key: telegramId → timeout
+
+const buildDisplayName = (userDoc) => {
+  const name = [userDoc.firstName, userDoc.lastName].filter(Boolean).join(' ') || userDoc.name || 'Без имени';
+  const safe = String(name).trim().replace(/\s+/g, ' ');
+  const nick = userDoc.username ? `@${userDoc.username}` : '(без никнейма)';
+  return { safeName: safe, nickLabel: nick };
+};
+
+const profileUrlFor = (userDoc) => userDoc.username ? `https://t.me/${userDoc.username}` : `tg://user?id=${userDoc.telegramId}`;
+
+async function sendLeadApplicationToGroup(telegramId) {
+  try {
+    const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
+    const user = await User.findOne({ telegramId }).lean();
+    if (!user || !GROUP_CHAT_ID) return;
+
+    const { safeName, nickLabel } = buildDisplayName(user);
+
+    // Последняя архивная комната с участием пользователя
+    const archivedRoom = await ArchivedRoom.findOne({ 'answers.id': String(telegramId) })
+      .sort({ archivedAt: -1 })
+      .lean();
+
+    const participantFromArchive = archivedRoom?.answers?.find(a => String(a.id) === String(telegramId));
+    const roomId = archivedRoom?.roomId ?? '—';
+    const membersCount = Array.isArray(archivedRoom?.members) ? archivedRoom.members.length : '—';
+
+    // ── Шапка: как в примере ─────────────────────────────────────────────
+    let message = `<b>📊 Заявка на разбор партнёрства</b>\n\n`;
+    message += `👤 <b>Участник:</b> ${nickLabel} — <b>${safeName}</b>\n`;
+    message += `<b>Комната:</b> ${roomId}\n`;
+    message += `<b>Участников:</b> ${membersCount}\n\n`;
+
+    // ── Ответы и результаты, если есть архив ─────────────────────────────
+    if (archivedRoom && participantFromArchive) {
+      // 🧠 Ответы на вопросы (если сохранены)
+      if (Array.isArray(participantFromArchive.questions_answers) && participantFromArchive.questions_answers.length) {
+        message += `<b>🧠 Ответы на вопросы:</b>\n`;
+        participantFromArchive.questions_answers.forEach((ans, i) => {
+          const t = String(ans ?? '').trim().replace(/\s+/g, ' ');
+          message += `${i + 1}. ${t}\n`;
+        });
+        message += `\n`;
+      }
+
+      // 📈 Средние доли по капиталам
+      if (archivedRoom?.result?.capitals && Array.isArray(archivedRoom.members)) {
+        message += `<b>Средние доли по капиталам</b>\n`;
+        for (const m of archivedRoom.members) {
+          const displayName = m?.startsWith('us') ? fromLatin(m.slice(2)) : m;
+          const caps = archivedRoom.result.capitals[m] || { econ: 0, human: 0, social: 0 };
+          message += `• ${displayName}\n`;
+          message += `<code>Экон ${pad(((caps.econ ?? 0)).toFixed(1))} %  ${bar(caps.econ ?? 0)}</code>\n`;
+          message += `<code>Чел  ${pad(((caps.human ?? 0)).toFixed(1))} %  ${bar(caps.human ?? 0)}</code>\n`;
+          message += `<code>Соц  ${pad(((caps.social ?? 0)).toFixed(1))} %  ${bar(caps.social ?? 0)}</code>\n\n`;
+        }
+      }
+
+      // 🧮 Итоговые доли
+      if (Array.isArray(archivedRoom?.result?.shares) && archivedRoom.result.shares.length) {
+        message += `<b>Итоговые доли</b>\n`;
+        for (const s of archivedRoom.result.shares) {
+          const nmRaw = typeof s.name === 'string' ? s.name : '';
+          const displayName = nmRaw.startsWith('us') ? fromLatin(nmRaw.slice(2)) : nmRaw;
+          message += `• <b>${String(displayName).trim()}</b>: <b>${s.share}%</b>\n`;
+        }
+      } else {
+        message += `<i>Тест ещё не проходил.</i>\n\n`;
+      }
+    } else {
+      // Нет архива — выводим как в примере без результатов
+      message += `<i>Тест ещё не проходил.</i>\n\n`;
+    }
+
+    // ── Красивые кнопки с эмодзи ─────────────────────────────────────────
+    const replyMarkupLead = {
+      inline_keyboard: [
+        [{ text: '👤 Открыть профиль', url: profileUrlFor(user) }],
+      ],
+    };
+
+    await bot.sendMessage(GROUP_CHAT_ID, message, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: replyMarkupLead,
+    });
+  } catch (e) {
+    console.error('Ошибка при отправке заявки в группу:', e);
+  }
+}
+
+async function startPostTestFlow(userDoc, roomId) {
+  const chatId = userDoc.telegramId;
+  const { safeName } = buildDisplayName(userDoc);
+  const kb = {
+    inline_keyboard: [
+      [
+        { text: '✅ Да, спасибо', callback_data: `pt_yes:${chatId}` },
+        { text: '🙅‍♂️ Нет', callback_data: `pt_no:${chatId}` },
+      ],
+      [{ text: '🧾 Запишите меня на разбор', callback_data: `pt_signup:${chatId}` }],
+    ],
+  };
+
+  {
+    const first = (safeName.split(' ')[0] || safeName);
+    await bot.sendMessage(
+      chatId,
+      `${first}, удовлетворены ли вы результатом теста?`,
+      { reply_markup: kb }
+    );
+  }
+
+  // Таймер на 5 минут — если нет действий, отправляем follow-up
+  clearTimeout(postTestTimers.get(chatId));
+  const t = setTimeout(async () => {
+    const followKb = {
+      inline_keyboard: [
+        [{ text: '🧾 Да, запишите на разбор', callback_data: `pt_follow_yes:${chatId}` }],
+        [{ text: '❓ Нет, у меня другой вопрос', callback_data: `pt_follow_no:${chatId}` }],
+      ],
+    };
+    await bot.sendMessage(
+      chatId,
+      `${safeName.split(' ')[0] || 'Имя'}, подскажите, для вас актуален вопрос разделения долей с партнёром?`,
+      { reply_markup: followKb }
+    );
+  }, 5 * 60 * 1000);
+  postTestTimers.set(chatId, t);
+}
+
+bot.on('callback_query', async (cb) => {
+  try {
+    const data = cb.data || '';
+    if (!data.startsWith('pt_')) return; // не наш флоу
+
+    const [action, idStr] = data.split(':');
+    const uid = Number(idStr);
+    clearTimeout(postTestTimers.get(uid));
+    postTestTimers.delete(uid);
+
+    const user = await User.findOne({ telegramId: uid });
+    if (!user) return bot.answerCallbackQuery(cb.id);
+    const { nickLabel, safeName } = buildDisplayName(user);
+
+    // Удаляем сообщение с кнопками, по которым кликнули (не критично, если не получится)
+    await bot.deleteMessage(cb.message.chat.id, cb.message.message_id).catch(() => {});
+
+    if (action === 'pt_yes') {
+      const kb = {
+        inline_keyboard: [
+          [{ text: '📞 Свяжите меня', callback_data: `pt_contact:${uid}` }],
+          [
+            { text: '📣 Канал Артёма', url: LINKS.channel },
+            { text: '🌐 Сайт', url: LINKS.site },
+          ],
+        ],
+      };
+      await bot.sendMessage(
+        cb.message.chat.id,
+        'Мы были рады помочь! Если у вас остался вопрос по партнёрской сессии, вы всегда можете задать его <b>службе заботы</b>',
+        { parse_mode: 'HTML', reply_markup: kb }
+      );
+    }
+
+    if (action === 'pt_no') {
+      const kb = { inline_keyboard: [[{ text: '🧾 Запишите меня на разбор', callback_data: `pt_signup:${uid}` }]] };
+      await bot.sendMessage(
+        cb.message.chat.id,
+        'Это нормальная ситуация. Доли могут быть распределены по-другому. На встрече с Артёмом вы сможете определить, как лучше это сделать',
+        { reply_markup: kb }
+      );
+    }
+
+    if (action === 'pt_signup' || action === 'pt_follow_yes' || action === 'pt_contact') {
+      const kb = {
+        inline_keyboard: [
+          [
+            { text: '📣 Канал Артёма', url: LINKS.channel },
+            { text: '🌐 Сайт', url: LINKS.site },
+          ],
+        ],
+      };
+      await bot.sendMessage(
+        cb.message.chat.id,
+        'Мы передали ваш контакт менеджеру! Валерия свяжется с вами в течение суток.',
+        { reply_markup: kb }
+      );
+      await sendLeadApplicationToGroup(uid);
+    }
+
+    if (action === 'pt_follow_no') {
+      const kb = {
+        inline_keyboard: [
+          [
+            { text: '📣 Канал Артёма', url: LINKS.channel },
+            { text: '🌐 Сайт', url: LINKS.site },
+          ],
+        ],
+      };
+      await bot.sendMessage(
+        cb.message.chat.id,
+        'Мы передали ваш контакт менеджеру! Валерия свяжется с вами в течение суток.',
+        { reply_markup: kb }
+      );
+      await sendLeadApplicationToGroup(uid);
+    }
+
+    await bot.answerCallbackQuery(cb.id);
+  } catch (e) {
+    console.error('Ошибка в post-test callback:', e);
+  }
+});
+
 // Команда /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
@@ -59,6 +282,7 @@ bot.onText(/\/start/, async (msg) => {
     await bot.sendMessage(
       chatId,
       `👋 Привет, ${from.first_name || 'друг'}!`,
+      `👋 Привет, ${from.first_name || 'друг'}!\n «Три капитала» — экономический, человеческий и социальный. Пройди короткий тест и получи обоснованное распределение долей.`,
       { reply_markup: replyMarkup }
     );
   } catch (err) {
@@ -241,14 +465,22 @@ setInterval(async () => {
         const user = await User.findOne({ telegramId: ans.id });
         if (user) {
           await bot.sendMessage(user.telegramId, message, { parse_mode: 'HTML' });
+          await startPostTestFlow(user, marked.roomId);
         }
       }
 
-      // После успешной отправки — удаляем комнату, чтобы не висела в БД
+      // После успешной отправки — архивируем комнату, а не удаляем
       try {
-        await Room.deleteOne({ _id: marked._id });
-      } catch (delErr) {
-        console.error('Ошибка удаления комнаты:', delErr);
+        await ArchivedRoom.create({
+          roomId: marked.roomId,
+          maxMembers: marked.maxMembers,
+          members: marked.members,
+          answers: marked.answers,
+          result: { weights, capitals, shares },
+        });
+        await Room.deleteOne({ _id: marked._id }); 
+      } catch (archErr) {
+        console.error('Ошибка при архивировании комнаты:', archErr);
       }
     }
   } catch (err) {

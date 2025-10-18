@@ -16,6 +16,7 @@ const partnerSchema = new mongoose.Schema({
 const answerSchema = new mongoose.Schema({
   id: String,   // уникальный userId
   name: String, // имя пользователя
+  questions_answers: [String], 
   self_input: {
     econ: Number,
     human: Number,
@@ -23,7 +24,6 @@ const answerSchema = new mongoose.Schema({
   },
   partners_input: [partnerSchema], // оценки его партнёров
 });
-
 // ─────────────────────────────────────────────
 // Основная схема комнаты
 // ─────────────────────────────────────────────
